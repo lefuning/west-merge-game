@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>西游·字战 | 文字合成割草小游戏</title>
+<style>
+  :root {
+    --gold: #ffd54f;
+    --gold-dark: #b8860b;
+    --red: #e24b4a;
+    --blue: #378add;
+    --bg: #12182b;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+  html, body {
+    width: 100%; height: 100%;
+    background: #0a0e1a;
+    font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+    overflow: hidden;
+    user-select: none;
+    touch-action: manipulation;
+  }
+
+  /* 竖屏游戏容器：720x1280 内部分辨率，等比缩放居中 */
+  #game-wrap {
+    position: absolute;
+    left: 50%; top: 50%;
+    transform: translate(-50%, -50%);
+    width: min(100vw, calc(100vh * 720 / 1280));
+    aspect-ratio: 720 / 1280;
+  }
+
+  #game-canvas {
+    width: 100%; height: 100%;
+    display: block;
+    border-radius: 12px;
+    box-shadow: 0 0 40px rgba(255, 213, 79, 0.15), 0 8px 32px rgba(0,0,0,0.6);
+    background: #12182b;
+    cursor: pointer;
+  }
+
+  /* 加载遮罩 */
+  #loading {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 16px;
+    background: radial-gradient(ellipse at 50% 30%, #1d2a4a 0%, #0a0e1a 70%);
+    border-radius: 12px;
+    z-index: 10;
+  }
+  #loading .logo {
+    font-size: 42px; font-weight: 700; letter-spacing: 6px;
+    background: linear-gradient(180deg, #ffe9a8, #ffb300);
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
+    text-shadow: 0 4px 20px rgba(255, 179, 0, 0.3);
+  }
+  #loading .sub { color: #8fa3c8; font-size: 14px; letter-spacing: 2px; }
+  #loading .bar { width: 200px; height: 6px; background: #1d2a4a; border-radius: 3px; overflow: hidden; }
+  #loading .bar i {
+    display: block; height: 100%; width: 0%;
+    background: linear-gradient(90deg, #ffb300, #ffd54f);
+    border-radius: 3px;
+    transition: width .2s;
+  }
+  #loading .tip { color: #5c6f96; font-size: 12px; }
+
+  /* 移动端提示旋转 */
+  @media (orientation: landscape) and (max-aspect-ratio: 1.2/1) {
+    #game-wrap { width: min(100vh, calc(100vw * 720 / 1280)); }
+  }
+</style>
+</head>
+<body>
+  <div id="game-wrap">
+    <canvas id="game-canvas" width="720" height="1280"></canvas>
+    <div id="loading">
+      <div class="logo">西游·字战</div>
+      <div class="sub">文字合成 · 放置割草</div>
+      <div class="bar"><i id="load-bar"></i></div>
+      <div class="tip">加载中...</div>
+    </div>
+  </div>
+  <script src="game.js"></script>
+</body>
+</html>
