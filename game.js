@@ -25,6 +25,13 @@ const HERO_SLOTS = [130, 270, 410, 550, 690]; // 5个英雄槽位 y
 const PLAYER_POS = { x: 85, y: 430 };          // 唐僧位置
 const JUMP_COST = 3;                            // 每次跳跃消耗古币
 const START_COINS = 15;                         // 初始古币（5次免费跳跃）
+const WAVES_PER_LEVEL = 3;                      // 每 3 波 = 1 关（约 2-3 分钟一关）
+const SAVE_KEY = 'west_zizhan_save_v1';         // 闯关进度存档 key
+// 结算/失败面板共用按钮区域（居中 240 宽，y 550，与点击处理一致）
+const PANEL_BTN = { x: W / 2 - 120, y: 550, w: 240, h: 64 };
+// 五圣归位胜利面板双按钮
+const WIN_CONTINUE_BTN = { x: 120, y: 550, w: 210, h: 64 };
+const WIN_MENU_BTN = { x: 390, y: 550, w: 210, h: 64 };
 
 /* ================= 合成链配置 ================= */
 const CHAINS = [
@@ -76,8 +83,12 @@ let state = {
   win: false, winTimer: 0,
   refreshUsed: 0, selected: null, jumping: false, jumpT: 0,
   jumpFrom: { x: 0, y: 0 }, jumpTarget: null,
-  kills: 0, maxWave: 0, started: false, waitingWave: false, waitT: 0
+  kills: 0, maxWave: 0, started: false, waitingWave: false, waitT: 0,
+  levelClear: null, clearTimer: 0   // 关末结算面板 + 淡入计时
 };
+
+// 闯关存档：最高通关关数 + 金币 + 已解锁链
+let save = { level: 0, coins: 0, unlocked: [true, false, false, false, false], kills: 0 };
 
 let screen = 'menu';   // 'menu' | 'game' 主菜单 / 游戏进行
 let menuT = 0;          // 主菜单动画计时
@@ -107,6 +118,38 @@ function easeOutBounce(t) { const n1 = 7.5625, d1 = 2.75; if (t < 1 / d1) return
 function hexA(hex, a) {
   const r = parseInt(hex.slice(1, 3), 16), g = parseInt(hex.slice(3, 5), 16), b = parseInt(hex.slice(5, 7), 16);
   return `rgba(${r},${g},${b},${a})`;
+}
+
+/* ================= 关卡工具（每 WAVES_PER_LEVEL 波为一关） ================= */
+function levelOfWave(w) { return Math.ceil(w / WAVES_PER_LEVEL); }      // 波次 → 关
+function waveInLevel(w) { return ((w - 1) % WAVES_PER_LEVEL) + 1; }     // 波次在关内的序号 1..N
+function levelStartWave(l) { return (l - 1) * WAVES_PER_LEVEL + 1; }    // 关 → 起始波
+
+/* ================= 存档系统 ================= */
+function loadSave() {
+  save = { level: 0, coins: 0, unlocked: [true, false, false, false, false], kills: 0 };
+  try {
+    const raw = localStorage.getItem(SAVE_KEY);
+    if (raw) {
+      const d = JSON.parse(raw);
+      if (typeof d.level === 'number') save.level = Math.max(0, Math.floor(d.level));
+      if (typeof d.coins === 'number') save.coins = Math.max(0, Math.floor(d.coins));
+      if (Array.isArray(d.unlocked) && d.unlocked.length === CHAINS.length) {
+        d.unlocked.forEach((u, i) => { if (u) save.unlocked[i] = true; });
+      }
+    }
+  } catch (e) { /* 存档损坏则从零开始 */ }
+}
+function writeSave() {
+  try { localStorage.setItem(SAVE_KEY, JSON.stringify(save)); } catch (e) { /* 隐私模式等场景忽略 */ }
+}
+// 金币高频变化（击杀掉落）节流写盘：800ms 合并一次
+let saveCoinsTimer = 0;
+function syncSaveCoins() {
+  save.coins = state.coins;
+  save.kills = state.kills;
+  if (saveCoinsTimer) return;
+  saveCoinsTimer = setTimeout(() => { saveCoinsTimer = 0; writeSave(); }, 800);
 }
 
 /* ================= 音效 (WebAudio 合成) ================= */
@@ -172,19 +215,29 @@ function initGrid() {
   }
 }
 function emptyCells() { return grid.filter(g => !g.c); }
-function resetGame() {
+function resetGame(opts) {
+  const o = opts || {};
+  loadSave(); // 读持久化进度
+  const startLevel = o.startLevel || 1;
+  const coins = (o.coins !== undefined) ? o.coins : START_COINS;
   state = {
-    coins: START_COINS, wave: 1, playerHp: 100, over: false, overTimer: 0,
+    coins: coins, wave: levelStartWave(startLevel), playerHp: 100, over: false, overTimer: 0,
     win: false, winTimer: 0,
     refreshUsed: 0, selected: null, jumping: false, jumpT: 0,
     jumpFrom: { x: 0, y: 0 }, jumpTarget: null,
-    kills: 0, maxWave: 0, started: true, waitingWave: false, waitT: 0
+    kills: 0, maxWave: 0, started: true, waitingWave: false, waitT: 0,
+    levelClear: null, clearTimer: 0
   };
-  CHAINS.forEach((c, i) => { c.unlocked = (i === 0); });
+  // 已解锁链从存档恢复（闯关进度不丢）
+  CHAINS.forEach((c, i) => { c.unlocked = save.unlocked[i]; });
   enemies = []; projectiles = []; particles = []; floats = []; heroes = [];
   combo = 0; comboTimer = 0; shake = 0;
   initGrid();
   waveState = { spawning: true, toSpawn: 6, timer: 1.0, interval: 1.1, done: false };
+  // 进入本关持有的金币写盘（金币在失败/过关间保留）
+  save.coins = state.coins;
+  save.kills = 0;
+  writeSave();
   // 开局送两个起始字，让玩家立刻体验合成
   setTimeout(() => { spawnChar(randEmpty()); spawnChar(randEmpty()); }, 300);
 }
@@ -224,6 +277,7 @@ function startJump() {
   if (!target) { floatText(W / 2, GRID_TOP - 20, '格子满了！先合成吧', '#ffcc80', 22); sfx('deny'); return; }
   if (state.coins < JUMP_COST) { floatText(W / 2, GRID_TOP - 20, '古币不足！击杀妖怪赚古币', '#ff8a80', 20); sfx('deny'); return; }
   state.coins -= JUMP_COST;
+  syncSaveCoins(); // 跳跃消耗同步存档
   state.jumping = true; state.jumpT = 0;
   state.jumpFrom = { x: PLAYER_POS.x + 40, y: PLAYER_POS.y };
   state.jumpTarget = target;
@@ -240,6 +294,7 @@ function mergeCells(a, b) {
   if (b.level >= 4 && chainDone(b.chainId)) {
     const price = b.level >= 5 ? 120 : 60;
     state.coins += price;
+    syncSaveCoins(); // 毕业折算同步存档
     floatText(b.x, b.y - 20, '毕业回收 +' + price + ' 古币', '#ffd54f', 24);
     burst(b.x, b.y, '#ffd54f', 20, 280, 5);
     burst(W / 2, BATTLE_TOP + BATTLE_H / 2, '#ffd54f', 20, 300, 5);
@@ -413,6 +468,7 @@ function killEnemy(e, idx) {
   else if (e.type === 'fast') coin = irand(1, 3);
   else coin = irand(2, 5);
   state.coins += coin;
+  syncSaveCoins(); // 击杀掉落节流写盘
   burst(e.x, e.y, '#ffd54f', 12, 220, 4);
   burst(e.x, e.y, e.elite ? '#ff9800' : (e.type === 'tank' ? '#ef5350' : (e.type === 'fast' ? '#ffca28' : '#b388ff')), 8, 180, 4);
   floatText(e.x, e.y - 16, '+' + coin, '#ffd54f', 18);
@@ -486,11 +542,30 @@ function update(dt) {
         waveState.spawning = false;
         const bonus = state.wave * 5;
         state.coins += bonus;
+        syncSaveCoins(); // 波次奖励同步存档
         floatText(W / 2, BATTLE_TOP + 100, '第 ' + state.wave + ' 波完成 +' + bonus + ' 古币', '#7cf7c8', 28);
         state.maxWave = Math.max(state.maxWave, state.wave);
-        state.wave++;
-        state.waitingWave = true; state.waitT = 1.6;
         sfx('coin');
+        const lv = levelOfWave(state.wave);
+        if (waveInLevel(state.wave) >= WAVES_PER_LEVEL) {
+          // —— 关末波：结算面板，等玩家点[下一关] ——
+          const first = save.level < lv;                 // 首次通关该关？
+          const firstBonus = first ? lv * 20 : 0;        // 首通奖：关数×20，只给一次
+          if (firstBonus > 0) state.coins += firstBonus;
+          state.levelClear = { level: lv, bonus: bonus, firstBonus: firstBonus, first: first, kills: state.kills };
+          state.clearTimer = 0;
+          state.waitingWave = false;                     // 暂停波次推进
+          if (first) {
+            save.level = lv;                             // 推进最高通关关数
+            sfx('win');
+          }
+          save.coins = state.coins;                      // 结算后的金币立即写盘
+          writeSave();
+        } else {
+          // 普通波：自动进下一波
+          state.wave++;
+          state.waitingWave = true; state.waitT = 1.6;
+        }
       }
     }
   }
@@ -603,14 +678,17 @@ function drawStatus() {
   ctx.font = 'bold 20px "Microsoft YaHei"';
   ctx.fillText(state.coins, 40, 60);
 
-  // 波次
+  // 关卡 & 波次
   ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffd54f';
+  ctx.font = 'bold 17px "Microsoft YaHei"';
+  ctx.fillText('第 ' + levelOfWave(state.wave) + ' 关', W - 80, 30);
   ctx.fillStyle = '#8fa3c8';
-  ctx.font = 'bold 16px "Microsoft YaHei"';
-  ctx.fillText('第 ' + state.wave + ' 波', W - 80, 34);
+  ctx.font = '13px "Microsoft YaHei"';
+  ctx.fillText('波 ' + waveInLevel(state.wave) + '/' + WAVES_PER_LEVEL, W - 80, 48);
   ctx.fillStyle = '#5c6f96';
   ctx.font = '12px "Microsoft YaHei"';
-  ctx.fillText('击杀 ' + state.kills, W - 80, 54);
+  ctx.fillText('击杀 ' + state.kills, W - 80, 63);
 
   // 连击
   if (combo >= 2 && comboTimer > 0) {
@@ -1098,6 +1176,50 @@ function drawBattleBg() {
 }
 
 /* ---------- 结束面板 ---------- */
+/* ---------- 关末结算面板 ---------- */
+function drawLevelClear(dt) {
+  ctx.fillStyle = 'rgba(5,8,16,0.72)';
+  ctx.fillRect(0, 0, W, H);
+  const t = clamp(state.clearTimer, 0, 1); // 淡入
+  ctx.globalAlpha = t;
+  const lc = state.levelClear;
+  const panelW = 500, panelH = 400;
+  const px = (W - panelW) / 2, py = 290;
+  ctx.fillStyle = '#101b33';
+  rr(px, py, panelW, panelH, 20, '#101b33', '#7cf7c8', 2);
+  // 标题
+  ctx.fillStyle = '#7cf7c8';
+  ctx.font = 'bold 44px "Microsoft YaHei"';
+  ctx.textAlign = 'center';
+  ctx.fillText('第 ' + lc.level + ' 关 通关！', W / 2, py + 74);
+  // 统计
+  ctx.fillStyle = '#b8c6e4';
+  ctx.font = '20px "Microsoft YaHei"';
+  ctx.fillText('击杀 ' + lc.kills + ' 个妖怪', W / 2, py + 122);
+  ctx.fillText('波次奖励 +' + lc.bonus + ' 古币', W / 2, py + 156);
+  if (lc.firstBonus > 0) {
+    // 首通大奖：金色高亮
+    ctx.fillStyle = '#ffd54f';
+    ctx.font = 'bold 24px "Microsoft YaHei"';
+    ctx.fillText('★ 首通奖励 +' + lc.firstBonus + ' 古币 ★', W / 2, py + 198);
+  }
+  // 进度
+  const unlockedCount = CHAINS.filter(c => c.unlocked).length;
+  ctx.fillStyle = '#8fa3c8';
+  ctx.font = '16px "Microsoft YaHei"';
+  ctx.fillText('已解锁角色 ' + unlockedCount + '/5 · 持有 ' + state.coins + ' 古币', W / 2, py + 240);
+  ctx.fillStyle = '#5c6f96';
+  ctx.font = '14px "Microsoft YaHei"';
+  ctx.fillText('下一关敌人更强，格子将清空重开', W / 2, py + 272);
+  // 下一关按钮
+  ctx.fillStyle = '#1d9e75';
+  rr(PANEL_BTN.x, PANEL_BTN.y, PANEL_BTN.w, PANEL_BTN.h, 14, '#1d9e75', '#7cf7c8', 2);
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 26px "Microsoft YaHei"';
+  ctx.fillText('下一关', W / 2, PANEL_BTN.y + PANEL_BTN.h / 2 + 4);
+  ctx.globalAlpha = 1;
+}
+
 function drawGameOver(dt) {
   ctx.fillStyle = 'rgba(5,8,16,0.75)';
   ctx.fillRect(0, 0, W, H);
@@ -1109,22 +1231,22 @@ function drawGameOver(dt) {
   ctx.fillStyle = '#ffd54f';
   ctx.font = 'bold 40px "Microsoft YaHei"';
   ctx.textAlign = 'center';
-  ctx.fillText('取经失败', W / 2, py + 70);
+  ctx.fillText('第 ' + levelOfWave(state.wave) + ' 关 · 失守', W / 2, py + 70);
   ctx.fillStyle = '#b8c6e4';
   ctx.font = '20px "Microsoft YaHei"';
   ctx.fillText('坚守到第 ' + state.maxWave + ' 波', W / 2, py + 115);
   ctx.fillText('击杀 ' + state.kills + ' 个妖怪', W / 2, py + 150);
-  ctx.fillText('获得 ' + state.coins + ' 古币', W / 2, py + 185);
+  ctx.fillText('持有 ' + state.coins + ' 古币', W / 2, py + 185);
   ctx.fillStyle = '#8fa3c8';
   ctx.font = '15px "Microsoft YaHei"';
-  ctx.fillText('点击下方按钮 重新踏上西行路', W / 2, py + 225);
-  // 重开按钮
-  const by2 = py + 250, bw = 240, bh2 = 64;
+  ctx.fillText('重试本关：金币与已解锁角色保留', W / 2, py + 225);
+  // 重试按钮
+  const by2 = PANEL_BTN.y, bw = PANEL_BTN.w, bh2 = PANEL_BTN.h;
   ctx.fillStyle = '#ffb300';
-  rr(W / 2 - bw / 2, by2, bw, bh2, 14, '#ffb300', '#ffd54f', 2);
+  rr(PANEL_BTN.x, by2, bw, bh2, 14, '#ffb300', '#ffd54f', 2);
   ctx.fillStyle = '#fff';
   ctx.font = 'bold 24px "Microsoft YaHei"';
-  ctx.fillText('重新开始', W / 2, by2 + bh2 / 2 + 4);
+  ctx.fillText('重试本关', W / 2, by2 + bh2 / 2 + 4);
 }
 
 /* ---------- 胜利面板（五圣归位） ---------- */
@@ -1182,13 +1304,16 @@ function drawWin(dt) {
   ctx.fillStyle = '#8fa3c8';
   ctx.font = '14px "Microsoft YaHei"';
   ctx.fillText('西天已到，功德圆满！', W / 2, py + 270);
-  // 重开按钮
-  const by2 = py + 300, bw = 240, bh2 = 64;
+  // 双按钮：继续挑战（不重置，继续打无限波）/ 回主菜单
   ctx.fillStyle = '#ffb300';
-  rr(W / 2 - bw / 2, by2, bw, bh2, 14, '#ffb300', '#ffd54f', 2);
+  rr(WIN_CONTINUE_BTN.x, WIN_CONTINUE_BTN.y, WIN_CONTINUE_BTN.w, WIN_CONTINUE_BTN.h, 14, '#ffb300', '#ffd54f', 2);
   ctx.fillStyle = '#fff';
-  ctx.font = 'bold 24px "Microsoft YaHei"';
-  ctx.fillText('再来一局', W / 2, by2 + bh2 / 2 + 4);
+  ctx.font = 'bold 22px "Microsoft YaHei"';
+  ctx.fillText('继续挑战', WIN_CONTINUE_BTN.x + WIN_CONTINUE_BTN.w / 2, WIN_CONTINUE_BTN.y + WIN_CONTINUE_BTN.h / 2 + 4);
+  ctx.fillStyle = '#2c3a66';
+  rr(WIN_MENU_BTN.x, WIN_MENU_BTN.y, WIN_MENU_BTN.w, WIN_MENU_BTN.h, 14, '#2c3a66', '#4a5c8f', 2);
+  ctx.fillStyle = '#c9d4ec';
+  ctx.fillText('回主菜单', WIN_MENU_BTN.x + WIN_MENU_BTN.w / 2, WIN_MENU_BTN.y + WIN_MENU_BTN.h / 2 + 4);
 }
 
 /* ================= 主菜单 ================= */
@@ -1238,7 +1363,7 @@ function drawMenu(dt) {
   // 副标题
   ctx.fillStyle = '#9db4d8';
   ctx.font = 'bold 22px "Microsoft YaHei"';
-  ctx.fillText('—— 文字合成 · 放置割草 · 五圣归位 ——', W / 2, 292 + bob * 0.5);
+  ctx.fillText('—— 文字合成 · 闯关割草 · 五圣归位 ——', W / 2, 292 + bob * 0.5);
 
   // 五圣字块展示条
   const demos = CHAINS.map((chain, i) => {
@@ -1275,8 +1400,8 @@ function drawMenu(dt) {
   rr(56, 560, W - 112, 208, 18, 'rgba(16,22,42,0.85)', '#2c3a66', 1.5);
   const tips = [
     ['🧩 拼字合将', '点击两个相同字块合成升级，拼出西游角色'],
-    ['⚔️ 自动御敌', '合出的英雄自动出战，抵御无尽妖潮'],
-    ['🏆 五圣归位', '集齐五条链的终极形态，功德圆满']
+    ['⚔️ 自动御敌', '合出的英雄自动出战，抵御妖潮'],
+    ['🏆 闯关西行', '每 3 波一关 · 首通大奖 · 进度永久保存']
   ];
   tips.forEach((tp, i) => {
     const ty = 610 + i * 52;
@@ -1289,6 +1414,16 @@ function drawMenu(dt) {
     ctx.fillText(tp[1], 230, ty);
   });
 
+  // 闯关进度行（有存档时显示在按钮上方）
+  const hasSave = save.level > 0;
+  if (hasSave) {
+    ctx.fillStyle = '#9db4d8';
+    ctx.font = 'bold 18px "Microsoft YaHei"';
+    ctx.textAlign = 'center';
+    ctx.fillText('已闯至第 ' + save.level + ' 关 · ' + save.coins + ' 古币 · 角色 ' +
+      save.unlocked.filter(Boolean).length + '/5', W / 2, 794);
+  }
+
   // 开始按钮（脉动）
   const pulse = 1 + Math.sin(t * 2.6) * 0.022;
   ctx.save();
@@ -1300,7 +1435,7 @@ function drawMenu(dt) {
   ctx.fillStyle = '#fff';
   ctx.font = 'bold 34px "Microsoft YaHei"';
   ctx.textAlign = 'center';
-  ctx.fillText('开始取经 ▶', 0, 13);
+  ctx.fillText(hasSave ? '继续闯关 ▶' : '开始取经 ▶', 0, 13);
   ctx.restore();
 
   // 操作提示
@@ -1312,7 +1447,7 @@ function drawMenu(dt) {
   // 版本
   ctx.fillStyle = '#3d4a68';
   ctx.font = '13px "Microsoft YaHei"';
-  ctx.fillText('v0.3.0 · 五圣归位版', W / 2, 1256);
+  ctx.fillText('v0.5.0 · 闯关模式', W / 2, 1256);
 
   ctx.restore();
 }
@@ -1393,31 +1528,60 @@ function render(dt) {
   drawGrid();
   drawDex();
 
-  // 结束面板
-  if (state.win) drawWin(dt);
+  // 结束面板（优先级：关结算 > 五圣归位 > 失败）
+  if (state.levelClear) drawLevelClear(dt);
+  else if (state.win) drawWin(dt);
   else if (state.over) drawGameOver(dt);
   ctx.restore();
 }
 
 /* ================= 输入处理 ================= */
 function handleTap(x, y) {
-  // 主菜单：点击开始按钮进入游戏
+  // 主菜单：点击开始按钮进入游戏（有存档则从下一关继续）
   if (screen === 'menu') {
     if (x > MENU_BTN.x && x < MENU_BTN.x + MENU_BTN.w &&
         y > MENU_BTN.y && y < MENU_BTN.y + MENU_BTN.h) {
       screen = 'game';
+      loadSave();
+      const startLevel = save.level + 1;                       // 从最高通关关的下一关开始
+      const coins = save.level > 0 ? save.coins : START_COINS; // 无存档时给初始币
       initGrid();
-      resetGame();
+      resetGame({ startLevel: startLevel, coins: coins });
       sfx('unlock');
       burst(W / 2, MENU_BTN.y + MENU_BTN.h / 2, '#ffd54f', 26, 320, 5);
     }
     return;
   }
-  if (state.over || state.win) {
-    // 点击重开（失败/通关面板按钮区域一致：550~614）
-    const py = 550;
-    if (x > W / 2 - 120 && x < W / 2 + 120 && y > py && y < py + 64) {
-      resetGame();
+  // 关末结算：点击[下一关] → 清格子开下一关，金币保留
+  if (state.levelClear) {
+    if (x > PANEL_BTN.x && x < PANEL_BTN.x + PANEL_BTN.w &&
+        y > PANEL_BTN.y && y < PANEL_BTN.y + PANEL_BTN.h) {
+      resetGame({ startLevel: state.levelClear.level + 1, coins: state.coins });
+      sfx('jump');
+    }
+    return;
+  }
+  if (state.over) {
+    // 重试本关：金币与已解锁角色保留
+    if (x > PANEL_BTN.x && x < PANEL_BTN.x + PANEL_BTN.w &&
+        y > PANEL_BTN.y && y < PANEL_BTN.y + PANEL_BTN.h) {
+      resetGame({ startLevel: levelOfWave(state.wave), coins: state.coins });
+      sfx('jump');
+    }
+    return;
+  }
+  if (state.win) {
+    // 继续挑战：不重置，继续打无限波
+    if (x > WIN_CONTINUE_BTN.x && x < WIN_CONTINUE_BTN.x + WIN_CONTINUE_BTN.w &&
+        y > WIN_CONTINUE_BTN.y && y < WIN_CONTINUE_BTN.y + WIN_CONTINUE_BTN.h) {
+      state.win = false; state.winTimer = 0;
+      sfx('jump');
+    }
+    // 回主菜单
+    if (x > WIN_MENU_BTN.x && x < WIN_MENU_BTN.x + WIN_MENU_BTN.w &&
+        y > WIN_MENU_BTN.y && y < WIN_MENU_BTN.y + WIN_MENU_BTN.h) {
+      state.win = false;
+      screen = 'menu';
       sfx('jump');
     }
     return;
@@ -1444,6 +1608,7 @@ function handleTap(x, y) {
           return;
         }
         state.coins -= 30; state.refreshUsed++;
+        syncSaveCoins(); // 刷新消耗同步存档
         state.selected = null;
         // 补回相同数量的新字
         let refilled = 0;
@@ -1467,6 +1632,9 @@ function handleTap(x, y) {
         if (state.coins >= next.unlockCost) {
           state.coins -= next.unlockCost;
           next.unlocked = true;
+          save.unlocked[next.id] = true; // 解锁永久保留
+          syncSaveCoins();
+          writeSave();
           burst(W / 2, GRID_TOP - 40, '#00e5c0', 30, 320, 6);
           floatText(W / 2, GRID_TOP - 60, '解锁「' + next.name + '」合成链！', '#7cf7c8', 30);
           sfx('unlock');
@@ -1485,6 +1653,7 @@ function handleTap(x, y) {
         if (cell && cell.level >= 4) {
           const price = cell.level >= 5 ? 120 : 60;
           state.coins += price;
+          syncSaveCoins(); // 回收同步存档
           burst(cell.x, cell.y, cell.level >= 5 ? '#ffd54f' : '#ff9800', 16, 220, 5);
           floatText(cell.x, cell.y - 30, '回收 +' + price + ' 古币', '#ffd54f', 22);
           sfx('coin');
@@ -1538,7 +1707,8 @@ function handleTap(x, y) {
 
   // 点击战斗区：如果没开始（初始界面），开始游戏
   if (!state.started) {
-    resetGame();
+    loadSave();
+    resetGame({ startLevel: save.level + 1, coins: save.level > 0 ? save.coins : START_COINS });
     sfx('jump');
   }
 }
@@ -1559,6 +1729,7 @@ function loop(ts) {
   if (screen !== 'menu') {
     if (state.over) state.overTimer += dt;
     if (state.win) state.winTimer += dt;
+    if (state.levelClear) state.clearTimer += dt;
     update(dt);
   }
   render(dt);
@@ -1567,6 +1738,7 @@ function loop(ts) {
 
 /* ================= 启动 ================= */
 function boot() {
+  loadSave(); // 启动即读档：主菜单显示闯关进度
   let p = 0;
   const iv = setInterval(() => {
     p += rand(15, 30);
